@@ -1,0 +1,1 @@
+# Mô phỏng hoạt động
