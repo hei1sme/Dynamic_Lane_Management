@@ -1,4 +1,0 @@
-# Danh sách thư viện Python
-numpy
-pandas
-matplotlib
