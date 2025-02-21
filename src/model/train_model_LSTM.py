@@ -104,3 +104,4 @@ print(f"✅ Test Accuracy: {test_acc:.4f}, Test Loss: {test_loss:.4f}")
 model_path = os.path.join(MODEL_DIR, "lstm_traffic_model.keras")
 model.save(model_path)
 print(f"💾 Model saved to {model_path}")
+
