@@ -1,0 +1,4 @@
+# Ignore captured images folder
+src/data_collection/captured_images/
+# Ignore logs folder
+src/data_collection/logs/
