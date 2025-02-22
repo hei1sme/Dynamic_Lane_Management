@@ -13,6 +13,20 @@ import imagehash
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 
+import customtkinter as ctk
+import threading
+import sys
+from tkinter import filedialog
+
+class UILogHandler(logging.Handler):
+    def __init__(self, ui):
+        super().__init__()
+        self.ui = ui
+
+    def emit(self, record):
+        msg = self.format(record)
+        self.ui.update_status(msg)
+
 class ImageProcessor:
     """Handles image processing and duplicate detection"""
     
@@ -224,6 +238,8 @@ class CameraCapture:
         self.last_saved_hash = None
         self.min_time_between_captures = 1  # Minimum seconds between captures
         self.last_capture_time = 0
+        self.stop_capture = False
+        self.pause_capture = False
         self.setup_logging()
 
     def setup_logging(self):
@@ -257,11 +273,23 @@ class CameraCapture:
 
     def capture_images(self):
         """Main capture loop"""
-        while True:
+        while not self.stop_capture:
             try:
+                # Check if paused
+                while self.pause_capture and not self.stop_capture:
+                    time.sleep(1)
+                    logging.info("Capture paused...")
+                    continue
+
                 if not self.time_manager.is_capture_time():
                     wait_time = self.time_manager.wait_until_next_window()
-                    time.sleep(wait_time)
+                    # Check stop_capture and pause_capture more frequently during wait
+                    for _ in range(int(wait_time)):
+                        if self.stop_capture:
+                            return
+                        if self.pause_capture:
+                            break
+                        time.sleep(1)
                     continue
                 
                 options = webdriver.ChromeOptions()
@@ -286,70 +314,56 @@ class CameraCapture:
 
     def _run_capture_session(self, driver):
         """Run a single capture session"""
-        js_code = self._get_observer_js()
-        save_folder = self.setup_folders()
-        last_cleanup_time = time.time()
-        cleanup_interval = 3600  # 1 hour in seconds
-        
-        initial_url = driver.execute_script(js_code, self.img_class)
-        initial_timestamp = self.get_timestamp_from_url(initial_url)
-        logging.info(f"Starting capture session... Initial timestamp: {initial_timestamp}")
-        
-        while self.time_manager.is_capture_time():
-            current_time = time.time()
-            if current_time - last_cleanup_time >= cleanup_interval:
-                logging.info(f"Hourly cleanup interval reached. Starting duplicate cleanup...")
-                duplicates_removed = self.image_processor.delete_duplicates(save_folder)
-                if duplicates_removed:
-                    logging.info(f"Cleanup completed. Removed {duplicates_removed} duplicate images.")
-                else:
-                    logging.info("Cleanup completed. No duplicates found.")
-                last_cleanup_time = current_time
+        try:
+            # Get initial timestamp
+            initial_timestamp = self.get_timestamp_from_url(self.url)
+            logging.info(f"Starting capture session... Initial timestamp: {initial_timestamp}")
             
-            change_data = self._handle_timestamp_change(driver)
-            self._process_new_image(change_data, save_folder)
-        
-        logging.info("Capture window ended. Closing browser session.")
-        driver.quit()
-
-    def _get_observer_js(self):
-        """Get JavaScript code for image observation"""
-        return """
-        let lastTimestamp = '';
-        const observer = new MutationObserver((mutations) => {
-            mutations.forEach((mutation) => {
-                if (mutation.type === 'attributes' && mutation.attributeName === 'src') {
-                    const newUrl = mutation.target.src;
-                    const timestamp = new URLSearchParams(new URL(newUrl).search).get('t');
-                    if (timestamp && timestamp !== lastTimestamp) {
-                        lastTimestamp = timestamp;
-                        const event = new CustomEvent('timestampChanged', {
-                            detail: {url: newUrl, timestamp: timestamp}
+            while not self.stop_capture:
+                # Check if paused
+                if self.pause_capture:
+                    time.sleep(1)
+                    continue
+                    
+                # Execute JavaScript to get new timestamp
+                change_data = driver.execute_script("""
+                    let lastTimestamp = '';
+                    const observer = new MutationObserver((mutations) => {
+                        mutations.forEach((mutation) => {
+                            if (mutation.type === 'attributes' && mutation.attributeName === 'src') {
+                                const newUrl = mutation.target.src;
+                                const timestamp = new URLSearchParams(new URL(newUrl).search).get('t');
+                                if (timestamp && timestamp !== lastTimestamp) {
+                                    lastTimestamp = timestamp;
+                                    const event = new CustomEvent('timestampChanged', {
+                                        detail: {url: newUrl, timestamp: timestamp}
+                                    });
+                                    document.dispatchEvent(event);
+                                }
+                            }
                         });
-                        document.dispatchEvent(event);
-                    }
-                }
-            });
-        });
-        
-        const img = document.querySelector('.' + arguments[0]);
-        observer.observe(img, {
-            attributes: true,
-            attributeFilter: ['src']
-        });
-        
-        return img.src;
-        """
-
-    def _handle_timestamp_change(self, driver):
-        """Handle timestamp change events"""
-        return driver.execute_script("""
-            return new Promise((resolve) => {
-                document.addEventListener('timestampChanged', (event) => {
-                    resolve(event.detail);
-                }, {once: true});
-            });
-        """)
+                    });
+                    
+                    const img = document.querySelector('.' + arguments[0]);
+                    observer.observe(img, {
+                        attributes: true,
+                        attributeFilter: ['src']
+                    });
+                    
+                    return img.src;
+                """, self.img_class)
+                
+                if change_data and change_data.get('timestamp') != initial_timestamp:
+                    today_folder = self.setup_folders()
+                    self._process_new_image(change_data, today_folder)
+                    initial_timestamp = change_data.get('timestamp')
+                
+                time.sleep(1)  # Short sleep to prevent excessive CPU usage
+                
+        except Exception as e:
+            logging.error(f"Session error: {e}")
+            if 'driver' in locals():
+                driver.quit()
 
     def _process_new_image(self, change_data, save_folder):
         """Enhanced image processing with immediate duplicate detection"""
@@ -399,70 +413,258 @@ class CameraCapture:
             if 'temp_file' in locals() and temp_file.exists():
                 temp_file.unlink()
 
-def parse_args():
-    """Parse command line arguments"""
-    parser = argparse.ArgumentParser(
-        description="Camera Image Capture Tool with Duplicate Detection",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  %(prog)s --url "https://camera.url" --class "camera-class"
-  %(prog)s --url "https://camera.url" --class "camera-class" --morning 6:00-10:00 --evening 14:00-18:00
-  %(prog)s --url "https://camera.url" --class "camera-class" --all-day
-  %(prog)s --help
-        """
-    )
-    
-    default_output = str(Path('src') / 'data_collection' / 'captured_images')
-    
-    parser.add_argument('--url', required=True,
-                      help='URL of the camera page')
-    parser.add_argument('--class', required=True, dest='img_class',
-                      help='HTML class name of the camera image element')
-    parser.add_argument('--morning', default='5:00-9:00',
-                      help='Morning capture window (format: HH:MM-HH:MM)')
-    parser.add_argument('--evening', default='15:00-19:00',
-                      help='Evening capture window (format: HH:MM-HH:MM)')
-    parser.add_argument('--all-day', action='store_true',
-                      help='Run from 05:00 to 22:00')
-    parser.add_argument('--output', default=default_output,
-                      help='Base output directory for captured images')
-    
-    args = parser.parse_args()
-    
-    # Parse time windows
-    def parse_time_window(window_str):
-        start, end = window_str.split('-')
-        start_h, start_m = map(int, start.split(':'))
-        end_h, end_m = map(int, end.split(':'))
-        return (start_h, start_m, end_h, end_m)
-    
-    morning_window = parse_time_window(args.morning)
-    evening_window = parse_time_window(args.evening)
-    
-    return args, morning_window, evening_window
+class CameraCaptureUI:
+    def __init__(self):
+        self.root = ctk.CTk()
+        self.root.title("CCTV Image Capture Tool")
+        self.root.geometry("800x800")
+        
+        # Set default output directory
+        self.base_output_dir = Path(r"C:\Users\Le Nguyen Gia Hung\Dropbox\Codes\.PROJECTS\major-project\Dynamic_Lane_Management\src\data_collection")
+        
+        # Set theme
+        ctk.set_appearance_mode("dark")
+        ctk.set_default_color_theme("blue")
+        
+        self.capture_thread = None
+        self.camera = None
+        self.is_paused = False
+        
+        # Create a custom logging handler
+        self.log_handler = UILogHandler(self)
+        logging.getLogger().addHandler(self.log_handler)
+        logging.getLogger().setLevel(logging.INFO)
+        
+        self.setup_ui()
+
+    def setup_ui(self):
+        # Create main frame
+        main_frame = ctk.CTkFrame(self.root)
+        main_frame.pack(fill="both", expand=True, padx=20, pady=20)
+
+        # Title
+        title = ctk.CTkLabel(main_frame, text="CCTV Image Capture Tool", 
+                            font=ctk.CTkFont(size=24, weight="bold"))
+        title.pack(pady=20)
+
+        # Input frame
+        input_frame = ctk.CTkFrame(main_frame)
+        input_frame.pack(fill="x", padx=20, pady=10)
+
+        # URL input
+        url_label = ctk.CTkLabel(input_frame, text="Camera URL:")
+        url_label.pack(anchor="w", padx=10, pady=(10,0))
+        self.url_entry = ctk.CTkEntry(input_frame, width=400, placeholder_text="Enter camera URL")
+        self.url_entry.pack(fill="x", padx=10, pady=(5,10))
+
+        # Image class input
+        class_label = ctk.CTkLabel(input_frame, text="Image Class:")
+        class_label.pack(anchor="w", padx=10, pady=(10,0))
+        self.class_entry = ctk.CTkEntry(input_frame, width=400, placeholder_text="Enter image class name")
+        self.class_entry.pack(fill="x", padx=10, pady=(5,10))
+
+        # Time mode selection
+        mode_frame = ctk.CTkFrame(main_frame)
+        mode_frame.pack(fill="x", padx=20, pady=10)
+        
+        mode_label = ctk.CTkLabel(mode_frame, text="Capture Mode:")
+        mode_label.pack(anchor="w", padx=10, pady=5)
+        
+        self.time_mode = ctk.StringVar(value="windows")
+        windows_radio = ctk.CTkRadioButton(mode_frame, text="Time Windows", 
+                                         variable=self.time_mode, value="windows")
+        windows_radio.pack(side="left", padx=20)
+        
+        allday_radio = ctk.CTkRadioButton(mode_frame, text="All Day", 
+                                         variable=self.time_mode, value="all_day")
+        allday_radio.pack(side="left", padx=20)
+
+        # Time windows frame
+        time_frame = ctk.CTkFrame(main_frame)
+        time_frame.pack(fill="x", padx=20, pady=10)
+        
+        time_label = ctk.CTkLabel(time_frame, text="Time Windows", 
+                                 font=ctk.CTkFont(size=16, weight="bold"))
+        time_label.pack(pady=10)
+
+        # Morning window
+        morning_frame = ctk.CTkFrame(time_frame)
+        morning_frame.pack(fill="x", padx=10, pady=5)
+        
+        ctk.CTkLabel(morning_frame, text="Morning:").pack(side="left", padx=10)
+        self.morning_start = ctk.CTkEntry(morning_frame, width=100, placeholder_text="HH:MM")
+        self.morning_start.pack(side="left", padx=5)
+        self.morning_start.insert(0, "5:00")
+        
+        ctk.CTkLabel(morning_frame, text="to").pack(side="left", padx=5)
+        self.morning_end = ctk.CTkEntry(morning_frame, width=100, placeholder_text="HH:MM")
+        self.morning_end.pack(side="left", padx=5)
+        self.morning_end.insert(0, "9:00")
+
+        # Evening window
+        evening_frame = ctk.CTkFrame(time_frame)
+        evening_frame.pack(fill="x", padx=10, pady=5)
+        
+        ctk.CTkLabel(evening_frame, text="Evening:").pack(side="left", padx=10)
+        self.evening_start = ctk.CTkEntry(evening_frame, width=100, placeholder_text="HH:MM")
+        self.evening_start.pack(side="left", padx=5)
+        self.evening_start.insert(0, "15:00")
+        
+        ctk.CTkLabel(evening_frame, text="to").pack(side="left", padx=5)
+        self.evening_end = ctk.CTkEntry(evening_frame, width=100, placeholder_text="HH:MM")
+        self.evening_end.pack(side="left", padx=5)
+        self.evening_end.insert(0, "19:00")
+
+        # Output directory frame with browse button
+        output_frame = ctk.CTkFrame(main_frame)
+        output_frame.pack(fill="x", padx=20, pady=10)
+        
+        output_label = ctk.CTkLabel(output_frame, text="Output Directory:", 
+                                   font=ctk.CTkFont(size=16, weight="bold"))
+        output_label.pack(side="left", padx=10, pady=5)
+        
+        self.browse_button = ctk.CTkButton(output_frame, text="Browse", 
+                                         command=self.browse_output_dir,
+                                         width=100)
+        self.browse_button.pack(side="right", padx=10, pady=5)
+
+        # Status text
+        status_label = ctk.CTkLabel(main_frame, text="Status Log:", 
+                                   font=ctk.CTkFont(size=16, weight="bold"))
+        status_label.pack(anchor="w", padx=20, pady=(20,5))
+        
+        self.status_text = ctk.CTkTextbox(main_frame, height=300)
+        self.status_text.pack(fill="x", padx=20, pady=(0,20))
+
+        # Control buttons
+        button_frame = ctk.CTkFrame(main_frame)
+        button_frame.pack(fill="x", padx=20, pady=10)
+        
+        self.start_button = ctk.CTkButton(button_frame, text="Start Capture", 
+                                         command=self.start_capture)
+        self.start_button.pack(side="left", padx=10, expand=True)
+        
+        self.pause_button = ctk.CTkButton(button_frame, text="Pause", 
+                                         command=self.pause_capture,
+                                         state="disabled",
+                                         fg_color="orange",
+                                         hover_color="darkorange")
+        self.pause_button.pack(side="left", padx=10, expand=True)
+        
+        self.stop_button = ctk.CTkButton(button_frame, text="Stop Capture", 
+                                        command=self.stop_capture, 
+                                        state="disabled",
+                                        fg_color="red",
+                                        hover_color="darkred")
+        self.stop_button.pack(side="left", padx=10, expand=True)
+
+    def update_status(self, message):
+        self.status_text.insert("end", f"{message}\n")
+        self.status_text.see("end")
+
+    def start_capture(self):
+        if not self.url_entry.get() or not self.class_entry.get():
+            self.show_error("Please enter both URL and Image Class")
+            return
+
+        try:
+            # Parse time windows
+            morning_start_h, morning_start_m = map(int, self.morning_start.get().split(':'))
+            morning_end_h, morning_end_m = map(int, self.morning_end.get().split(':'))
+            evening_start_h, evening_start_m = map(int, self.evening_start.get().split(':'))
+            evening_end_h, evening_end_m = map(int, self.evening_end.get().split(':'))
+
+            morning_window = (morning_start_h, morning_start_m, morning_end_h, morning_end_m)
+            evening_window = (evening_start_h, evening_start_m, evening_end_h, evening_end_m)
+
+            # Create output directory using the correct base path
+            images_dir = self.base_output_dir / 'captured_images' / 'images'
+            today_folder = images_dir / datetime.now().strftime('%Y-%m-%d')
+            today_folder.mkdir(parents=True, exist_ok=True)
+            
+            # Update output path display
+            self.browse_button.configure(state="disabled")
+            self.browse_button.configure(text=str(today_folder))
+
+            self.camera = CameraCapture(
+                url=self.url_entry.get(),
+                img_class=self.class_entry.get(),
+                base_folder=self.base_output_dir / 'captured_images',
+                morning_window=morning_window,
+                evening_window=evening_window
+            )
+
+            if self.time_mode.get() == "all_day":
+                self.camera.time_manager = TimeManager(
+                    time_mode='all_day',
+                    all_day_start=(5, 0),
+                    all_day_end=(22, 0)
+                )
+
+            self.capture_thread = threading.Thread(target=self.run_capture)
+            self.capture_thread.daemon = True
+            self.capture_thread.start()
+
+            self.start_button.configure(state="disabled")
+            self.pause_button.configure(state="normal")
+            self.stop_button.configure(state="normal")
+            logging.info("Capture started...")
+
+        except ValueError:
+            self.show_error("Invalid time format. Use HH:MM format.")
+
+    def pause_capture(self):
+        """Handle pause/resume functionality"""
+        if self.camera:
+            if not self.is_paused:
+                # Pause the capture
+                self.camera.pause_capture = True
+                self.is_paused = True
+                self.pause_button.configure(text="Resume")
+                logging.info("Capture paused...")
+            else:
+                # Resume the capture
+                self.camera.pause_capture = False
+                self.is_paused = False
+                self.pause_button.configure(text="Pause")
+                logging.info("Capture resumed...")
+
+    def stop_capture(self):
+        if self.camera:
+            self.camera.stop_capture = True
+            self.camera.pause_capture = False  # Ensure we're not paused when stopping
+            self.start_button.configure(state="normal")
+            self.pause_button.configure(state="disabled")
+            self.stop_button.configure(state="disabled")
+            self.pause_button.configure(text="Pause")  # Reset pause button text
+            self.is_paused = False
+            logging.info("Capture stopped.")
+
+    def show_error(self, message):
+        ctk.CTkMessagebox(title="Error", message=message, icon="cancel")
+
+    def run_capture(self):
+        try:
+            self.camera.capture_images()
+        except Exception as e:
+            logging.error(f"Error: {str(e)}")
+            self.root.after(0, self.stop_capture)  # Safely stop capture on error
+
+    def browse_output_dir(self):
+        directory = filedialog.askdirectory(
+            initialdir=self.base_output_dir,
+            title="Select Output Directory"
+        )
+        if directory:  # If a directory was selected
+            self.base_output_dir = Path(directory)
+            self.update_status(f"Output directory changed to: {self.base_output_dir}")
+
+    def run(self):
+        self.root.mainloop()
 
 def main():
-    """Main entry point"""
-    args, morning_window, evening_window = parse_args()
-    
-    camera = CameraCapture(
-        url=args.url,
-        img_class=args.img_class,
-        base_folder=args.output,
-        morning_window=morning_window,
-        evening_window=evening_window
-    )
-    
-    # Modify CameraCapture initialization based on mode
-    if args.all_day:
-        camera.time_manager = TimeManager(
-            time_mode='all_day',
-            all_day_start=(5, 00),
-            all_day_end=(22, 0)
-        )
-    
-    camera.capture_images()
+    app = CameraCaptureUI()
+    app.run()
 
 if __name__ == "__main__":
     main()

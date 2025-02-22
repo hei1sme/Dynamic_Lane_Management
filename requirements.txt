@@ -1,0 +1,9 @@
+# Core dependencies
+selenium>=4.0.0
+Pillow>=9.0.0  # For PIL/Image processing
+requests>=2.25.0
+imagehash>=4.3.0  # For image hash comparison
+customtkinter>=5.1.2  # For modern UI elements
+
+# Optional but recommended
+webdriver-manager>=3.8.0  # For managing Chrome driver
