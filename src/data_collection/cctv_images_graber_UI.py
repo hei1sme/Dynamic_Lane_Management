@@ -315,55 +315,64 @@ class CameraCapture:
     def _run_capture_session(self, driver):
         """Run a single capture session"""
         try:
+            # Wait for page to load and log initial state
+            logging.info("Waiting for page to load...")
+            driver.implicitly_wait(10)  # Add implicit wait
+            
             # Get initial timestamp
             initial_timestamp = self.get_timestamp_from_url(self.url)
             logging.info(f"Starting capture session... Initial timestamp: {initial_timestamp}")
             
             while not self.stop_capture:
-                # Check if paused
-                if self.pause_capture:
+                try:
+                    # Check if paused
+                    if self.pause_capture:
+                        time.sleep(1)
+                        continue
+                    
+                    # Find image element with timeout
+                    logging.debug("Looking for image element...")
+                    img_element = driver.find_element(By.CLASS_NAME, self.img_class)
+                    
+                    if not img_element:
+                        logging.warning("Image element not found")
+                        time.sleep(1)
+                        continue
+                    
+                    current_url = img_element.get_attribute('src')
+                    logging.debug(f"Current image URL: {current_url}")
+                    
+                    if not current_url:
+                        logging.warning("No src attribute found")
+                        time.sleep(1)
+                        continue
+                    
+                    current_timestamp = self.get_timestamp_from_url(current_url)
+                    logging.debug(f"Current timestamp: {current_timestamp}")
+                    
+                    if current_timestamp and current_timestamp != initial_timestamp:
+                        today_folder = self.setup_folders()
+                        self._process_new_image({'url': current_url, 'timestamp': current_timestamp}, today_folder)
+                        initial_timestamp = current_timestamp
+                    
+                    # Refresh the page periodically to prevent stale content
+                    if not self.stop_capture and not self.pause_capture:
+                        driver.refresh()
+                        logging.debug("Page refreshed")
+                        time.sleep(5)  # Wait after refresh
+                    
+                except Exception as inner_e:
+                    logging.error(f"Error during capture loop: {inner_e}")
                     time.sleep(1)
-                    continue
-                    
-                # Execute JavaScript to get new timestamp
-                change_data = driver.execute_script("""
-                    let lastTimestamp = '';
-                    const observer = new MutationObserver((mutations) => {
-                        mutations.forEach((mutation) => {
-                            if (mutation.type === 'attributes' && mutation.attributeName === 'src') {
-                                const newUrl = mutation.target.src;
-                                const timestamp = new URLSearchParams(new URL(newUrl).search).get('t');
-                                if (timestamp && timestamp !== lastTimestamp) {
-                                    lastTimestamp = timestamp;
-                                    const event = new CustomEvent('timestampChanged', {
-                                        detail: {url: newUrl, timestamp: timestamp}
-                                    });
-                                    document.dispatchEvent(event);
-                                }
-                            }
-                        });
-                    });
-                    
-                    const img = document.querySelector('.' + arguments[0]);
-                    observer.observe(img, {
-                        attributes: true,
-                        attributeFilter: ['src']
-                    });
-                    
-                    return img.src;
-                """, self.img_class)
-                
-                if change_data and change_data.get('timestamp') != initial_timestamp:
-                    today_folder = self.setup_folders()
-                    self._process_new_image(change_data, today_folder)
-                    initial_timestamp = change_data.get('timestamp')
-                
-                time.sleep(1)  # Short sleep to prevent excessive CPU usage
                 
         except Exception as e:
             logging.error(f"Session error: {e}")
-            if 'driver' in locals():
+        finally:
+            try:
                 driver.quit()
+                logging.info("Browser session closed")
+            except Exception as e:
+                logging.error(f"Error closing browser: {e}")
 
     def _process_new_image(self, change_data, save_folder):
         """Enhanced image processing with immediate duplicate detection"""

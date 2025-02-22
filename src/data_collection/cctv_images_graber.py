@@ -257,32 +257,40 @@ class CameraCapture:
 
     def capture_images(self):
         """Main capture loop"""
-        while True:
-            try:
-                if not self.time_manager.is_capture_time():
-                    wait_time = self.time_manager.wait_until_next_window()
-                    time.sleep(wait_time)
-                    continue
-                
-                options = webdriver.ChromeOptions()
-                options.add_argument('--headless')
-                options.add_argument('--no-sandbox')
-                options.add_argument('--disable-dev-shm-usage')
-                
-                driver = webdriver.Chrome(options=options)
-                driver.get(self.url)
-                
-                self._run_capture_session(driver)
-                
-            except KeyboardInterrupt:
-                logging.info("\nMonitoring stopped by user")
-                if 'driver' in locals():
-                    driver.quit()
-                break
-            except Exception as e:
-                logging.error(f"Session error: {e}")
-                if 'driver' in locals():
-                    driver.quit()
+        try:
+            while True:
+                try:
+                    if not self.time_manager.is_capture_time():
+                        wait_time = self.time_manager.wait_until_next_window()
+                        time.sleep(wait_time)
+                        continue
+                    
+                    options = webdriver.ChromeOptions()
+                    options.add_argument('--headless')
+                    options.add_argument('--no-sandbox')
+                    options.add_argument('--disable-dev-shm-usage')
+                    
+                    driver = webdriver.Chrome(options=options)
+                    driver.get(self.url)
+                    
+                    self._run_capture_session(driver)
+                    
+                except KeyboardInterrupt:
+                    logging.info("\nMonitoring stopped by user")
+                    if 'driver' in locals():
+                        driver.quit()
+                    break
+                except Exception as e:
+                    logging.error(f"Session error: {e}")
+                    if 'driver' in locals():
+                        driver.quit()
+                    # Add sleep before retry
+                    time.sleep(60)  # Wait 1 minute before retrying
+        finally:
+            # Cleanup on exit
+            if 'driver' in locals():
+                driver.quit()
+            logging.info("Capture session ended, cleaning up...")
 
     def _run_capture_session(self, driver):
         """Run a single capture session"""
