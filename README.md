@@ -1,5 +1,11 @@
 # [WIP] Dynamic Traffic Management Using Mobile Barriers
 
+[![Python Version](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/downloads/)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Code Style](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
+[![Selenium](https://img.shields.io/badge/selenium-4.15.0-yellow.svg)](https://www.selenium.dev/)
+[![CustomTkinter](https://img.shields.io/badge/CustomTkinter-5.2.0-orange.svg)](https://github.com/TomSchimansky/CustomTkinter)
+
 ## Project Overview
 This project aims to develop an AI-powered traffic management system that dynamically adjusts lane distribution using mobile barriers. The system will analyze real-time traffic patterns to predict peak hours and suggest optimal barrier movements to improve traffic flow.
 
