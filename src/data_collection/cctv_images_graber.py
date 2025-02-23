@@ -421,7 +421,8 @@ Examples:
         """
     )
     
-    default_output = str(Path('src') / 'data_collection' / 'captured_images')
+    # Change default output to be relative to script location
+    default_output = str(Path(__file__).parent / 'captured_images')
     
     parser.add_argument('--url', required=True,
                       help='URL of the camera page')
